@@ -1,0 +1,78 @@
+name: Sync Fork with Upstream
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # daily at 04:00 UTC
+  workflow_dispatch:       # can be triggered manually
+
+jobs:
+  sync:
+    name: Sync fork
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Detect upstream repository
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PARENT=$(gh api repos/${{ github.repository }} --jq '.parent.full_name // empty')
+          if [ -z "$PARENT" ]; then
+            echo "This repository is not a fork or has no parent repository. Aborting." >&2
+            exit 1
+          fi
+          DEFAULT_BRANCH=$(gh api repos/$PARENT --jq '.default_branch')
+          echo "repo=$PARENT" >> "$GITHUB_OUTPUT"
+          echo "branch=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Capture current HEAD
+        id: pre_sync
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Sync with upstream
+        id: sync
+        run: |
+          git remote add upstream "https://github.com/${{ steps.upstream.outputs.repo }}.git"
+          git fetch upstream
+          git checkout "${{ steps.upstream.outputs.branch }}"
+          git merge --ff-only "upstream/${{ steps.upstream.outputs.branch }}"
+          git push origin "${{ steps.upstream.outputs.branch }}"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## Sync Fork with Upstream" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Fork** | \`${{ github.repository }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Upstream** | \`${{ steps.upstream.outputs.repo }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Branch** | \`${{ steps.upstream.outputs.branch }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Triggered by** | \`${{ github.event_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Run at** | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Status** | ${{ steps.sync.outcome == 'success' && '✅ Success' || '❌ Failed' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          PRE_SHA="${{ steps.pre_sync.outputs.sha }}"
+          NEW_COMMITS=$(git log "$PRE_SHA"..HEAD --oneline 2>/dev/null)
+
+          if [ -n "$NEW_COMMITS" ]; then
+            echo "### New commits" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "| SHA | Message |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+            git log "$PRE_SHA"..HEAD --pretty=format:"%h|%s" | while IFS='|' read -r sha msg; do
+              REPO="${{ steps.upstream.outputs.repo }}"
+              echo "| [\`$sha\`](https://github.com/$REPO/commit/$sha) | $msg |" >> "$GITHUB_STEP_SUMMARY"
+            done
+          else
+            echo "_No new commits – fork was already up to date._" >> "$GITHUB_STEP_SUMMARY"
+          fi
