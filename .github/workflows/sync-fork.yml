@@ -69,12 +69,25 @@ jobs:
 
           if [ "$OPT_FORCE_SYNC" = "true" ]; then
             git reset --hard "upstream/$BRANCH"
-          else
-            git merge --no-edit "upstream/$BRANCH"
-          fi
+          elif [ "$OPT_PROTECT_WORKFLOWS" = "true" ]; then
+            # Merge without auto-commit so we can enforce local workflow files
+            # before creating the merge commit.
+            set +e
+            git merge --no-commit --no-ff "upstream/$BRANCH"
+            MERGE_EXIT=$?
+            set -e
 
-          # Optionally restore local .github/workflows
-          if [ "$OPT_PROTECT_WORKFLOWS" = "true" ]; then
+            # If merge failed, only continue when conflicts are limited to workflows.
+            if [ "$MERGE_EXIT" -ne 0 ]; then
+              CONFLICTS=$(git diff --name-only --diff-filter=U)
+              NON_WORKFLOW_CONFLICTS=$(echo "$CONFLICTS" | grep -vE '^\.github/workflows/' || true)
+              if [ -n "$NON_WORKFLOW_CONFLICTS" ]; then
+                echo "Conflicts outside .github/workflows detected:" >&2
+                echo "$NON_WORKFLOW_CONFLICTS" >&2
+                exit 1
+              fi
+            fi
+
             # Remove all synced workflow files first, then restore exactly
             # what existed on the fork before sync.
             git rm -r --ignore-unmatch .github/workflows
@@ -85,9 +98,20 @@ jobs:
 
             # Stage via .github so this does not fail when workflows do not exist.
             git add -A .github
-            if ! git diff --cached --quiet; then
-              git commit -m "chore: restore local .github/workflows after upstream sync"
+
+            # Fail fast if unresolved conflicts remain.
+            if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+              echo "Unresolved merge conflicts remain:" >&2
+              git diff --name-only --diff-filter=U >&2
+              exit 1
             fi
+
+            # Finalize merge only when a merge is actually in progress.
+            if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+              git commit --no-edit
+            fi
+          else
+            git merge --no-edit "upstream/$BRANCH"
           fi
 
           if [ "$OPT_DRY_RUN" = "true" ]; then
