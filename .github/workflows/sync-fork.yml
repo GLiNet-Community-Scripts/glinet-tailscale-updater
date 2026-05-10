@@ -75,7 +75,16 @@ jobs:
 
           # Optionally restore local .github/workflows
           if [ "$OPT_PROTECT_WORKFLOWS" = "true" ]; then
-            git checkout "$PRE_SHA" -- .github/workflows
+            # Remove all synced workflow files first, then restore exactly
+            # what existed on the fork before sync.
+            git rm -r --ignore-unmatch .github/workflows
+
+            if git cat-file -e "$PRE_SHA":.github/workflows 2>/dev/null; then
+              git restore --source="$PRE_SHA" --staged --worktree .github/workflows
+            fi
+
+            # Stage via .github so this does not fail when workflows do not exist.
+            git add -A .github
             if ! git diff --cached --quiet; then
               git commit -m "chore: restore local .github/workflows after upstream sync"
             fi
