@@ -248,6 +248,7 @@ Special thanks to:
 
 - [lwbt](https://github.com/lwbt) – UPX compression & tiny-tailscale feature
 - [Aubermean](https://github.com/Aubermean) – Clarification of `--stateful-filtering=false` ([#1](https://github.com/Admonstrator/glinet-tailscale-updater/issues/1))
+- [Dongming Han (GL.iNet)](https://github.com/handongming) - Implementing the fwmark patch for GL.iNet routers ([#82](https://github.com/admonstrator/glinet-tailscale-updater/pull/82))
 - All the testers and feedback providers in the GL.iNet forum!
 - Copilot – Yeah, I am using AI to help write code. But I review and test everything thoroughly!
 

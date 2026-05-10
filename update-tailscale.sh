@@ -4,7 +4,7 @@
 # Description: This script updates tailscale on GL.iNet routers
 # Thread: https://forum.gl-inet.com/t/how-to-update-tailscale-on-arm64/37582
 # Author: Admon
-SCRIPT_VERSION="2026.03.10.01"
+SCRIPT_VERSION="2026.05.06.01"
 SCRIPT_NAME="update-tailscale.sh"
 UPDATE_URL="https://get.admon.me/tailscale-update"
 TAILSCALE_TINY_URL="https://github.com/Admonstrator/glinet-tailscale-updater/releases/latest/download/"
@@ -185,14 +185,18 @@ preflight_check() {
 }
 
 backup() {
-    log "INFO" "Creating backup of tailscale config"
-    TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-    if [ ! -d "/root/tailscale_config_backup" ]; then
-        mkdir "/root/tailscale_config_backup"
+    if [ ! -d "/etc/config/tailscale" ]; then
+        log "WARNING" "/etc/config/tailscale not found. Skipping backup."
+    else
+        log "INFO" "Creating backup of tailscale config"
+        TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+        if [ ! -d "/root/tailscale_config_backup" ]; then
+            mkdir "/root/tailscale_config_backup"
+        fi
+        tar czf "/root/tailscale_config_backup/$TIMESTAMP.tar.gz" -C "/" "etc/config/tailscale"
+        log "SUCCESS" "Backup created: /root/tailscale_config_backup/$TIMESTAMP.tar.gz"
+        log "INFO" "The binaries will not be backed up, you can restore them by using the --restore flag."
     fi
-    tar czf "/root/tailscale_config_backup/$TIMESTAMP.tar.gz" -C "/" "etc/config/tailscale"
-    log "SUCCESS" "Backup created: /root/tailscale_config_backup/$TIMESTAMP.tar.gz"
-    log "INFO" "The binaries will not be backed up, you can restore them by using the --restore flag."
 }
 
 # ==============================================================================

@@ -6,7 +6,7 @@
 
 **Keep Tailscale up-to-date on your GL.iNet router with ease!**
 
-[![Latest Release](https://img.shields.io/badge/release-v1.96.4-blue?style=for-the-badge&logo=github)](https://github.com/Admonstrator/glinet-tailscale-updater/releases/latest) [![License](https://img.shields.io/github/license/Admonstrator/glinet-tailscale-updater?style=for-the-badge)](LICENSE) [![Stars](https://img.shields.io/badge/stars-599-brightgreen?style=for-the-badge&logo=github)](https://github.com/Admonstrator/glinet-tailscale-updater/stargazers)
+[![Latest Release](https://img.shields.io/badge/release-v1.96.4-blue?style=for-the-badge&logo=github)](https://github.com/Admonstrator/glinet-tailscale-updater/releases/latest) [![License](https://img.shields.io/github/license/Admonstrator/glinet-tailscale-updater?style=for-the-badge)](LICENSE) [![Stars](https://img.shields.io/badge/stars-605-brightgreen?style=for-the-badge&logo=github)](https://github.com/Admonstrator/glinet-tailscale-updater/stargazers)
 
 ---
 
@@ -248,6 +248,7 @@ Special thanks to:
 
 - [lwbt](https://github.com/lwbt) – UPX compression & tiny-tailscale feature
 - [Aubermean](https://github.com/Aubermean) – Clarification of `--stateful-filtering=false` ([#1](https://github.com/Admonstrator/glinet-tailscale-updater/issues/1))
+- [Dongming Han (GL.iNet)](https://github.com/handongming) - Implementing the fwmark patch for GL.iNet routers ([#82](https://github.com/admonstrator/glinet-tailscale-updater/pull/82))
 - All the testers and feedback providers in the GL.iNet forum!
 - Copilot – Yeah, I am using AI to help write code. But I review and test everything thoroughly!
 
@@ -287,6 +288,6 @@ This project is part of a comprehensive collection of tools for GL.iNet routers.
 
 <div align="center">
 
-_Last updated: 2026-05-03_
+_Last updated: 2026-05-10_
 
 </div>
