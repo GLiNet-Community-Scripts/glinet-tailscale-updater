@@ -105,16 +105,26 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: repo
-      - name: Apply nft fwmark native-endian patch (remove when upstream #19601 is in release)
-        run: patch -p1 < repo/patches/0001-fix-nftables-fwmark-endianness.patch
-      - name: Apply nft connmark restore coexistence patch (GL policy marks / skb fwmark)
-        run: patch -p1 < repo/patches/0002-nft-connmark-restore-gl-coexist.patch
+      - name: Apply GL.iNet patches to Tailscale source
+        env:
+          TAILSCALE_TAG: ${{ env.TAG }}
+        run: repo/scripts/apply-tailscale-patches.sh --patch-dir repo/patches --source-dir .
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
       - name: Download Go modules
         run: go mod download
+      # Structural check that the patches produced the behaviour we ship. The apply
+      # script already asserts this textually on every leg; this compiles the real
+      # thing once, so a skipped or misplaced hunk cannot slip through. `publish`
+      # has `needs: build` and fail-fast is on, so nothing gets released past it.
+      - name: Verify GL.iNet patch invariants
+        if: matrix.platform == 'amd64'
+        run: |
+          cp repo/patches/verify/gl_invariants_test.go util/linuxfw/zz_gl_invariants_test.go
+          go test ./util/linuxfw/ -run TestGLPatchInvariants -v
+          rm util/linuxfw/zz_gl_invariants_test.go
       - name: Cross-compile
         run: |
           # Get version information
