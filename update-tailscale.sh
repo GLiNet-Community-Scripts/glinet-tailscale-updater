@@ -174,7 +174,7 @@ backup() {
 
     BACKUP_PATH=""
 
-    if [ ! -f "/etc/config/tailscale" ]; then
+    if [ ! -e "/etc/config/tailscale" ]; then
         log "WARNING" "/etc/config/tailscale not found. Skipping backup."
         return 0
     fi
@@ -199,6 +199,7 @@ backup() {
 
     log "SUCCESS" "Backup created: $BACKUP_PATH"
     log "INFO" "The binaries will not be backed up, you can restore them by using the --restore flag."
+    return 0
 }
 
 # ==============================================================================
@@ -433,10 +434,12 @@ upgrade_persistance() {
         if [ "$USER_WANTS_PERSISTENCE" != "${USER_WANTS_PERSISTENCE#[y]}" ]; then
             log "INFO" "Making installation permanent"
             log "INFO" "Modifying /etc/sysupgrade.conf"
+            # Stale backup entries are dropped even if no new backup was created,
+            # otherwise a broken path from an earlier run stays in the file forever
+            if grep -q "/root/tailscale_config_backup/" /etc/sysupgrade.conf; then
+                sed -i '/\/root\/tailscale_config_backup\//d' /etc/sysupgrade.conf
+            fi
             if [ -n "$BACKUP_PATH" ] && [ -f "$BACKUP_PATH" ]; then
-                if grep -q "/root/tailscale_config_backup/" /etc/sysupgrade.conf; then
-                    sed -i '/\/root\/tailscale_config_backup\//d' /etc/sysupgrade.conf
-                fi
                 if ! grep -qF "$BACKUP_PATH" /etc/sysupgrade.conf; then
                     echo "$BACKUP_PATH" >>/etc/sysupgrade.conf
                 fi

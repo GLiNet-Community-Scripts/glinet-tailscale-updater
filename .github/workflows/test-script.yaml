@@ -109,28 +109,100 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Verify a regular config file is backed up
+      - name: Write backup regression test
         run: |
-          cat > /tmp/test_backup.sh << 'EOF'
+          cat > "$RUNNER_TEMP/test_backup.sh" << 'EOF'
           #!/bin/sh
+          # Runs inside a throwaway container, so /etc/config and /root can be
+          # written for real without touching the runner.
           set -eu
+
+          SCRIPT=/src/update-tailscale.sh
 
           log() { :; }
           BACKUP_PATH=""
 
-          eval "$(sed -n '/^backup() {/,/^}/p' update-tailscale.sh)"
+          eval "$(sed -n '/^backup() {/,/^}/p' "$SCRIPT")"
 
-          mkdir -p /etc/config
+          fail() { echo "FAIL: $1" >&2; exit 1; }
+
+          reset_state() {
+              rm -rf /etc/config/tailscale /root/tailscale_config_backup
+              mkdir -p /etc/config
+              BACKUP_PATH=""
+          }
+
+          # 1) regular UCI config file - the GL.iNet case
+          reset_state
           printf '%s\n' "config settings 'settings'" > /etc/config/tailscale
+          backup || fail "backup returned non-zero for a regular config file"
+          [ -n "$BACKUP_PATH" ] || fail "BACKUP_PATH is empty for a regular config file"
+          [ -s "$BACKUP_PATH" ] || fail "archive is empty for a regular config file"
+          tar tzf "$BACKUP_PATH" | grep -qx 'etc/config/tailscale' \
+              || fail "archive does not contain etc/config/tailscale"
+          echo "OK: regular config file is backed up"
 
-          backup
+          # 2) directory - covers -e instead of -f
+          reset_state
+          mkdir -p /etc/config/tailscale
+          printf '%s\n' "state" > /etc/config/tailscale/tailscaled.state
+          backup || fail "backup returned non-zero for a config directory"
+          [ -n "$BACKUP_PATH" ] || fail "BACKUP_PATH is empty for a config directory"
+          tar tzf "$BACKUP_PATH" | grep -qx 'etc/config/tailscale/tailscaled.state' \
+              || fail "archive does not contain the directory contents"
+          echo "OK: config directory is backed up"
 
-          test -n "$BACKUP_PATH"
-          test -s "$BACKUP_PATH"
-          tar tzf "$BACKUP_PATH" | grep -qx 'etc/config/tailscale'
+          # 3) no config at all - GLKVM Comet Pro, issue #83
+          reset_state
+          backup || fail "backup must succeed when there is no config to back up"
+          [ -z "$BACKUP_PATH" ] || fail "BACKUP_PATH must stay empty when there is no config"
+          echo "OK: missing config is skipped without an error"
+
+          # 4) backup directory cannot be created - must abort, not claim success
+          reset_state
+          printf '%s\n' "config settings 'settings'" > /etc/config/tailscale
+          : > /root/tailscale_config_backup
+          if backup 2>/dev/null; then
+              fail "backup must fail when the backup directory cannot be created"
+          fi
+          [ -z "$BACKUP_PATH" ] || fail "BACKUP_PATH must be cleared when the backup fails"
+          echo "OK: a failing backup aborts and clears BACKUP_PATH"
+
+          # --- /etc/sysupgrade.conf handling -------------------------------
+          IS_GLINET=1
+          USER_WANTS_PERSISTENCE="y"
+          eval "$(sed -n '/^upgrade_persistance() {/,/^}/p' "$SCRIPT")"
+
+          # 5) a stale backup entry is dropped even when no new backup exists
+          BACKUP_PATH=""
+          printf '%s\n' "/root/tailscale_config_backup/.tar.gz" > /etc/sysupgrade.conf
+          upgrade_persistance
+          if grep -q "tailscale_config_backup" /etc/sysupgrade.conf; then
+              fail "stale backup entry was not removed from /etc/sysupgrade.conf"
+          fi
+          echo "OK: stale backup entry is removed without a new backup"
+
+          # 6) a fresh backup replaces the previous entry
+          reset_state
+          printf '%s\n' "config settings 'settings'" > /etc/config/tailscale
+          backup || fail "backup returned non-zero while preparing the persistence test"
+          printf '%s\n' "/root/tailscale_config_backup/old.tar.gz" > /etc/sysupgrade.conf
+          upgrade_persistance
+          grep -qxF "$BACKUP_PATH" /etc/sysupgrade.conf \
+              || fail "the new backup path is missing from /etc/sysupgrade.conf"
+          [ "$(grep -c "tailscale_config_backup" /etc/sysupgrade.conf)" -eq 1 ] \
+              || fail "/etc/sysupgrade.conf holds more than one backup entry"
+          echo "OK: a fresh backup replaces the previous entry"
+
+          echo "All backup regression tests passed"
           EOF
 
-          sudo sh /tmp/test_backup.sh
+      - name: Run backup regression tests in an isolated container
+        run: |
+          docker run --rm \
+            -v "$PWD/update-tailscale.sh:/src/update-tailscale.sh:ro" \
+            -v "$RUNNER_TEMP/test_backup.sh:/src/test_backup.sh:ro" \
+            -w /src alpine:3.20 sh /src/test_backup.sh
 
   log-function-tests:
     name: Log Function Tests
