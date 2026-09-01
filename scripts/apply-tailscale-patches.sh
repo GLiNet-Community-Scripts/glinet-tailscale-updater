@@ -24,7 +24,7 @@ set -euo pipefail
 # is supposed to keep flowing; the end-state assertions are the hard gate.
 PATCHES_TESTED_TAG="v1.102.1"
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PATCH_DIR="$SCRIPT_DIR/../patches"
 SOURCE_DIR="."
 CHECK_ONLY=false
@@ -62,7 +62,7 @@ done
 [ -d "$PATCH_DIR" ]  || die "patch directory not found: $PATCH_DIR"
 [ -d "$SOURCE_DIR" ] || die "source directory not found: $SOURCE_DIR"
 
-PATCH_DIR=$(CDPATH= cd -- "$PATCH_DIR" && pwd)
+PATCH_DIR=$(CDPATH='' cd -- "$PATCH_DIR" && pwd)
 cd "$SOURCE_DIR"
 
 [ -f util/linuxfw/linuxfw.go ] || die \
@@ -135,8 +135,8 @@ assert_end_state() {
     # Retired patch 0001: tailscale v1.100.0 fixed the fwmark byte order itself
     # (tailscale/tailscale#11803). The hardcoded big-endian literals must not return.
     if grep -q '0xff, 0x00, 0xff, 0xff' "$lfw"; then
-        die "$lfw still contains the big-endian fwmark literals -- tailscale reverted the"\
-" #11803 fix, so patches/0001-fix-nftables-fwmark-endianness.patch has to come back"
+        die "$lfw still contains the big-endian fwmark literals -- tailscale reverted the \
+#11803 fix, so patches/0001-fix-nftables-fwmark-endianness.patch has to come back"
     fi
     grep -q 'binary.NativeEndian' "$lfw" || die \
         "$lfw does not use binary.NativeEndian for the fwmark bytes -- see tailscale/tailscale#11803"
@@ -148,8 +148,8 @@ assert_end_state() {
 
     ct_loads=$(printf '%s\n' "$body" | grep -c 'expr\.CtKeyMARK' || true)
     [ "$ct_loads" -eq 2 ] || die \
-        "makeConnmarkRestoreExprs() loads the ct mark $ct_loads time(s), want 2 --"\
-" patches/0002-nft-connmark-restore-gl-coexist.patch did not take effect"
+        "makeConnmarkRestoreExprs() loads the ct mark $ct_loads time(s), want 2 -- \
+patches/0002-nft-connmark-restore-gl-coexist.patch did not take effect"
 
     last_ct=$(printf  '%s\n' "$body" | grep -n 'expr\.CtKeyMARK' | tail -1 | cut -d: -f1)
     last_cmp=$(printf '%s\n' "$body" | grep -n '&expr\.Cmp{'     | tail -1 | cut -d: -f1)
@@ -157,8 +157,8 @@ assert_end_state() {
     [ -n "$last_cmp" ] && [ -n "$meta_line" ] || die \
         "makeConnmarkRestoreExprs() no longer has the expected Cmp/Meta shape -- rebase patches/0002"
     if [ "$last_ct" -lt "$last_cmp" ] || [ "$last_ct" -gt "$meta_line" ]; then
-        die "the unmasked ct-mark reload is not between the non-zero guard and the"\
-" meta-mark assignment -- patches/0002 applied in the wrong place"
+        die "the unmasked ct-mark reload is not between the non-zero guard and the \
+meta-mark assignment -- patches/0002 applied in the wrong place"
     fi
 
     note "end state OK: native-endian fwmark bytes, connmark restore copies the full ct mark"
@@ -168,8 +168,8 @@ check_drift() {
     local tag=${TAILSCALE_TAG:-}
     [ -n "$tag" ] || return 0
     [ "$tag" = "$PATCHES_TESTED_TAG" ] && return 0
-    warn "building tailscale $tag, but patches/ were last rebased against $PATCHES_TESTED_TAG"\
-" -- if this build is green the patches still fit; bump PATCHES_TESTED_TAG in $(basename "$0")"
+    warn "building tailscale $tag, but patches/ were last rebased against $PATCHES_TESTED_TAG \
+-- if this build is green the patches still fit; bump PATCHES_TESTED_TAG in $(basename "$0")"
 }
 
 if [ "$CHECK_ONLY" = false ]; then
