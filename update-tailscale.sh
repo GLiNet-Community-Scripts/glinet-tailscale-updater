@@ -4,7 +4,7 @@
 # Description: This script updates tailscale on GL.iNet routers
 # Thread: https://forum.gl-inet.com/t/how-to-update-tailscale-on-arm64/37582
 # Author: Admon
-SCRIPT_VERSION="2026.05.20.01"
+SCRIPT_VERSION="2026.09.01.01"
 SCRIPT_NAME="update-tailscale.sh"
 UPDATE_URL="https://get.admon.me/tailscale-update"
 TAILSCALE_TINY_URL="https://github.com/Admonstrator/glinet-tailscale-updater/releases/latest/download/"
@@ -32,6 +32,7 @@ SKIP_CONFIG=0
 USER_WANTS_UPX=""
 USER_WANTS_SSH=""
 USER_WANTS_PERSISTENCE=""
+BACKUP_PATH=""
 
 # Constants - Colors
 RED='\033[0;31m'
@@ -168,18 +169,37 @@ preflight_check() {
 }
 
 backup() {
-    if [ ! -d "/etc/config/tailscale" ]; then
+    local timestamp
+    local backup_dir
+
+    BACKUP_PATH=""
+
+    if [ ! -e "/etc/config/tailscale" ]; then
         log "WARNING" "/etc/config/tailscale not found. Skipping backup."
-    else
-        log "INFO" "Creating backup of tailscale config"
-        TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-        if [ ! -d "/root/tailscale_config_backup" ]; then
-            mkdir "/root/tailscale_config_backup"
-        fi
-        tar czf "/root/tailscale_config_backup/$TIMESTAMP.tar.gz" -C "/" "etc/config/tailscale"
-        log "SUCCESS" "Backup created: /root/tailscale_config_backup/$TIMESTAMP.tar.gz"
-        log "INFO" "The binaries will not be backed up, you can restore them by using the --restore flag."
+        return 0
     fi
+
+    log "INFO" "Creating backup of tailscale config"
+    timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
+    backup_dir="/root/tailscale_config_backup"
+    BACKUP_PATH="$backup_dir/$timestamp.tar.gz"
+
+    if ! mkdir -p "$backup_dir"; then
+        log "ERROR" "Could not create tailscale backup directory: $backup_dir"
+        BACKUP_PATH=""
+        return 1
+    fi
+
+    if ! tar czf "$BACKUP_PATH" -C "/" "etc/config/tailscale"; then
+        log "ERROR" "Could not create tailscale config backup. Aborting update."
+        rm -f "$BACKUP_PATH"
+        BACKUP_PATH=""
+        return 1
+    fi
+
+    log "SUCCESS" "Backup created: $BACKUP_PATH"
+    log "INFO" "The binaries will not be backed up, you can restore them by using the --restore flag."
+    return 0
 }
 
 # ==============================================================================
@@ -414,11 +434,15 @@ upgrade_persistance() {
         if [ "$USER_WANTS_PERSISTENCE" != "${USER_WANTS_PERSISTENCE#[y]}" ]; then
             log "INFO" "Making installation permanent"
             log "INFO" "Modifying /etc/sysupgrade.conf"
+            # Stale backup entries are dropped even if no new backup was created,
+            # otherwise a broken path from an earlier run stays in the file forever
             if grep -q "/root/tailscale_config_backup/" /etc/sysupgrade.conf; then
                 sed -i '/\/root\/tailscale_config_backup\//d' /etc/sysupgrade.conf
             fi
-            if ! grep -q "/root/tailscale_config_backup/$TIMESTAMP.tar.gz" /etc/sysupgrade.conf; then
-                echo "/root/tailscale_config_backup/$TIMESTAMP.tar.gz" >>/etc/sysupgrade.conf
+            if [ -n "$BACKUP_PATH" ] && [ -f "$BACKUP_PATH" ]; then
+                if ! grep -qF "$BACKUP_PATH" /etc/sysupgrade.conf; then
+                    echo "$BACKUP_PATH" >>/etc/sysupgrade.conf
+                fi
             fi
             if ! grep -q "/usr/sbin/tailscale" /etc/sysupgrade.conf; then
                 echo "/usr/sbin/tailscale" >>/etc/sysupgrade.conf
@@ -945,7 +969,7 @@ main() {
     if [ "$NO_TINY" -eq 1 ]; then
         # Load the original tailscale
         get_latest_tailscale_version
-        backup
+        backup || exit 1
         install_tailscale
         invoke_modify_script
         restart_tailscale
@@ -955,7 +979,7 @@ main() {
     else
         # Load the tiny tailscale
         get_latest_tailscale_version_tiny
-        backup
+        backup || exit 1
         install_tiny_tailscale
         invoke_modify_script
         restart_tailscale
