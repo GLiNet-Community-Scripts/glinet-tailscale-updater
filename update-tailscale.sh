@@ -248,9 +248,26 @@ backup() {
 
     BACKUP_PATH=""
 
-    if [ ! -e "/etc/config/tailscale" ]; then
-        log "WARNING" "/etc/config/tailscale not found. Skipping backup."
-        return 0
+    # The positional parameters collect the paths to archive, relative to /
+    set --
+    if [ "${IS_GLKVM:-0}" -eq 1 ]; then
+        # GL.iNet KVM: JSON config plus the state dir with the node identity
+        if [ -e "$GLKVM_CONFIG_FILE" ]; then
+            set -- "$@" "${GLKVM_CONFIG_FILE#/}"
+        fi
+        if [ -e "$GLKVM_STATE_DIR" ]; then
+            set -- "$@" "${GLKVM_STATE_DIR#/}"
+        fi
+        if [ "$#" -eq 0 ]; then
+            log "WARNING" "No tailscale config found in ${GLKVM_CONFIG_FILE%/*}. Skipping backup."
+            return 0
+        fi
+    else
+        if [ ! -e "/etc/config/tailscale" ]; then
+            log "WARNING" "/etc/config/tailscale not found. Skipping backup."
+            return 0
+        fi
+        set -- "etc/config/tailscale"
     fi
 
     log "INFO" "Creating backup of tailscale config"
@@ -264,7 +281,7 @@ backup() {
         return 1
     fi
 
-    if ! tar czf "$BACKUP_PATH" -C "/" "etc/config/tailscale"; then
+    if ! tar czf "$BACKUP_PATH" -C "/" "$@"; then
         log "ERROR" "Could not create tailscale config backup. Aborting update."
         rm -f "$BACKUP_PATH"
         BACKUP_PATH=""
@@ -272,7 +289,11 @@ backup() {
     fi
 
     log "SUCCESS" "Backup created: $BACKUP_PATH"
-    log "INFO" "The binaries will not be backed up, you can restore them by using the --restore flag."
+    if [ "${IS_GLKVM:-0}" -eq 1 ]; then
+        log "INFO" "The binaries will not be backed up. Use --select-release to install a specific tailscale version."
+    else
+        log "INFO" "The binaries will not be backed up, you can restore them by using the --restore flag."
+    fi
     return 0
 }
 
