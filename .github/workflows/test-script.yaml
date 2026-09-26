@@ -121,7 +121,11 @@ jobs:
 
           log() { :; }
           BACKUP_PATH=""
+          # These cases cover routers and plain OpenWrt; the GL.iNet KVM
+          # paths of backup() are covered by glkvm-tests
+          IS_GLKVM=0
 
+          eval "$(sed -n '/^GLKVM_[A-Z_]*=/p' "$SCRIPT")"
           eval "$(sed -n '/^backup() {/,/^}/p' "$SCRIPT")"
 
           fail() { echo "FAIL: $1" >&2; exit 1; }
@@ -204,6 +208,477 @@ jobs:
             -v "$RUNNER_TEMP/test_backup.sh:/src/test_backup.sh:ro" \
             -w /src alpine:3.20 sh /src/test_backup.sh
 
+  glkvm-tests:
+    name: GL.iNet KVM Regression Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Write GL.iNet KVM regression test
+        run: |
+          cat > "$RUNNER_TEMP/test_glkvm.sh" << 'EOF'
+          #!/bin/sh
+          # GL.iNet KVM (Comet, Comet Pro) regression tests, issue #89.
+          # Runs inside a throwaway container, so /etc, /usr and /root can be
+          # written for real without touching the runner. Asserts state only
+          # (files, symlinks, init script calls, archives, return codes), never
+          # log wording. Functions are called from an `if` or `||` context so a
+          # non-zero return inside them never trips `set -e` of this harness.
+          set -eu
+
+          SCRIPT=${SCRIPT:-/src/update-tailscale.sh}
+
+          log() { :; }
+          sleep() { :; }
+
+          eval "$(sed -n '/^GLKVM_[A-Z_]*=/p' "$SCRIPT")"
+          for func in detect_platform backup cleanup_stale_binaries \
+              install_tailscale install_tiny_tailscale upgrade_persistance \
+              start_tailscale stop_tailscale; do
+              eval "$(sed -n "/^${func}() {/,/^}/p" "$SCRIPT")"
+          done
+
+          fail() { echo "FAIL: $1" >&2; exit 1; }
+
+          INIT_LOG=/tmp/init-calls.log
+          CANARY_LOG=/tmp/wrong-init.log
+
+          reset_state() {
+              rm -rf /etc/version /etc/glversion \
+                  /etc/init.d/S99tailscale /etc/init.d/tailscale \
+                  /usr/bin/tailscale /usr/bin/tailscaled \
+                  /usr/sbin/tailscale /usr/sbin/tailscaled \
+                  /usr/bin/gl_tailscale \
+                  /etc/kvmd /etc/config/tailscale \
+                  /root/tailscale_config_backup /etc/sysupgrade.conf \
+                  /tmp/*.log /tmp/tailscaled-linux-* /tmp/tailscale
+              mkdir -p /etc/init.d /etc/config /usr/bin /usr/sbin
+              IS_GLINET=0
+              IS_GLKVM=0
+              FIRMWARE_VERSION=0
+              GLKVM_MODEL=""
+              GLKVM_VERSION=""
+              TAILSCALE_BIN_DIR="/usr/sbin"
+              BACKUP_PATH=""
+              USER_WANTS_PERSISTENCE=""
+              TINY_ARCH="arm64"
+              TAILSCALE_SUBDIR_IN_TAR=""
+          }
+
+          # The KVM init script stub: records its action, exits with $1 (default 0).
+          # DAEMON= mirrors the shipped /etc/init.d/S99tailscale.
+          plant_kvm_init() {
+              cat > "$GLKVM_INIT_SCRIPT" << STUB
+          #!/bin/sh
+          DAEMON="/usr/bin/tailscaled"
+          echo "\$1" >> $INIT_LOG
+          exit ${1:-0}
+          STUB
+              chmod +x "$GLKVM_INIT_SCRIPT"
+          }
+
+          # The OpenWrt init script: must never be called on a KVM.
+          plant_canary() {
+              cat > /etc/init.d/tailscale << STUB
+          #!/bin/sh
+          echo "\$1" >> $CANARY_LOG
+          exit 0
+          STUB
+              chmod +x /etc/init.d/tailscale
+          }
+
+          plant_rm10_version() {
+              printf '%s\n' "RK_MODEL=RM10" "RK_VERSION=V1.9.1 release1" "RK_OTA_HOST=" > "$GLKVM_VERSION_FILE"
+          }
+
+          plant_kvm_config() {
+              mkdir -p "$(dirname "$GLKVM_CONFIG_FILE")"
+              printf '%s\n' '{"enable": true}' > "$GLKVM_CONFIG_FILE"
+          }
+
+          plant_kvm_state() {
+              mkdir -p "$GLKVM_STATE_DIR"
+              printf '%s\n' "node identity" > "$GLKVM_STATE_DIR/tailscaled.state"
+          }
+
+          # The pair a broken earlier run of this script leaves behind on a KVM
+          plant_stale_sbin() {
+              printf '%s\n' "stale tiny build" > /usr/sbin/tailscaled
+              ln -sf /usr/sbin/tailscaled /usr/sbin/tailscale
+          }
+
+          # Two separate regular firmware binaries, as shipped on the Comet Pro
+          plant_firmware_bin() {
+              printf '%s\n' "firmware tailscale" > /usr/bin/tailscale
+              printf '%s\n' "firmware tailscaled" > /usr/bin/tailscaled
+              chmod +x /usr/bin/tailscale /usr/bin/tailscaled
+          }
+
+          log_is() {
+              # log_is <file> <expected lines...>: exact content check, missing file = empty
+              file=$1
+              shift
+              expected=$(printf '%s\n' "$@")
+              [ $# -gt 0 ] || expected=""
+              actual=$(cat "$file" 2>/dev/null || true)
+              [ "$actual" = "$expected" ]
+          }
+
+          canary_silent() {
+              [ ! -s "$CANARY_LOG" ]
+          }
+
+          # ==============================================================================
+          # detect_platform
+          # ==============================================================================
+
+          # 1) plain system
+          reset_state
+          detect_platform || fail "detect_platform returned non-zero on a plain system"
+          [ "$IS_GLINET" = 0 ] && [ "$IS_GLKVM" = 0 ] && [ "$TAILSCALE_BIN_DIR" = /usr/sbin ] \
+              || fail "plain system: IS_GLINET=$IS_GLINET IS_GLKVM=$IS_GLKVM TAILSCALE_BIN_DIR=$TAILSCALE_BIN_DIR"
+          echo "OK: detect_platform - plain system is neither router nor KVM"
+
+          # 2) GL.iNet router
+          reset_state
+          printf '%s\n' "4.7.0" > /etc/glversion
+          detect_platform || fail "detect_platform returned non-zero on a router"
+          [ "$IS_GLINET" = 1 ] && [ "$FIRMWARE_VERSION" = 4 ] && [ "$IS_GLKVM" = 0 ] \
+              && [ "$TAILSCALE_BIN_DIR" = /usr/sbin ] \
+              || fail "router: IS_GLINET=$IS_GLINET FIRMWARE_VERSION=$FIRMWARE_VERSION IS_GLKVM=$IS_GLKVM TAILSCALE_BIN_DIR=$TAILSCALE_BIN_DIR"
+          echo "OK: detect_platform - /etc/glversion is a GL.iNet router"
+
+          # 3) Comet Pro as shipped
+          reset_state
+          plant_rm10_version
+          plant_kvm_init
+          detect_platform || fail "detect_platform returned non-zero on a KVM"
+          [ "$IS_GLKVM" = 1 ] && [ "$IS_GLINET" = 0 ] && [ "$GLKVM_MODEL" = RM10 ] \
+              && [ "$GLKVM_VERSION" = "V1.9.1 release1" ] && [ "$TAILSCALE_BIN_DIR" = /usr/bin ] \
+              || fail "RM10: IS_GLKVM=$IS_GLKVM GLKVM_MODEL=$GLKVM_MODEL GLKVM_VERSION=$GLKVM_VERSION TAILSCALE_BIN_DIR=$TAILSCALE_BIN_DIR"
+          echo "OK: detect_platform - Comet Pro RM10 uses /usr/bin"
+
+          # 4) DAEMON= unquoted with a trailing comment
+          reset_state
+          plant_rm10_version
+          printf '%s\n' '#!/bin/sh' 'DAEMON=/opt/ts/tailscaled  # comment' > "$GLKVM_INIT_SCRIPT"
+          detect_platform || fail "detect_platform returned non-zero for a custom DAEMON="
+          [ "$IS_GLKVM" = 1 ] && [ "$TAILSCALE_BIN_DIR" = /opt/ts ] \
+              || fail "custom DAEMON=: IS_GLKVM=$IS_GLKVM TAILSCALE_BIN_DIR=$TAILSCALE_BIN_DIR"
+          echo "OK: detect_platform - follows the DAEMON= line of the init script"
+
+          # 5) RK_MODEL without init script
+          reset_state
+          plant_rm10_version
+          detect_platform || fail "detect_platform returned non-zero without init script"
+          [ "$IS_GLKVM" = 1 ] && [ "$TAILSCALE_BIN_DIR" = /usr/bin ] \
+              || fail "RK_MODEL only: IS_GLKVM=$IS_GLKVM TAILSCALE_BIN_DIR=$TAILSCALE_BIN_DIR"
+          echo "OK: detect_platform - RK_MODEL alone means KVM with the /usr/bin fallback"
+
+          # 6) init script without /etc/version
+          reset_state
+          plant_kvm_init
+          detect_platform || fail "detect_platform returned non-zero without /etc/version"
+          [ "$IS_GLKVM" = 1 ] && [ "$TAILSCALE_BIN_DIR" = /usr/bin ] \
+              || fail "init script only: IS_GLKVM=$IS_GLKVM TAILSCALE_BIN_DIR=$TAILSCALE_BIN_DIR"
+          echo "OK: detect_platform - the init script alone means KVM"
+
+          # 7) router wins over RK_MODEL
+          reset_state
+          printf '%s\n' "4.7.0" > /etc/glversion
+          plant_rm10_version
+          detect_platform || fail "detect_platform returned non-zero with glversion and RK_MODEL"
+          [ "$IS_GLINET" = 1 ] && [ "$IS_GLKVM" = 0 ] && [ "$TAILSCALE_BIN_DIR" = /usr/sbin ] \
+              || fail "glversion + RK_MODEL: IS_GLINET=$IS_GLINET IS_GLKVM=$IS_GLKVM TAILSCALE_BIN_DIR=$TAILSCALE_BIN_DIR"
+          echo "OK: detect_platform - /etc/glversion wins over RK_MODEL"
+
+          # ==============================================================================
+          # start_tailscale / stop_tailscale
+          # ==============================================================================
+
+          # 8) KVM, enabled in the web UI
+          reset_state
+          IS_GLKVM=1
+          TAILSCALE_BIN_DIR=/usr/bin
+          plant_kvm_init
+          plant_canary
+          plant_kvm_config
+          stop_tailscale || fail "stop_tailscale returned non-zero on a KVM"
+          start_tailscale || fail "start_tailscale returned non-zero on a KVM"
+          log_is "$INIT_LOG" stop start || fail "KVM init script calls were: $(cat "$INIT_LOG" 2>/dev/null)"
+          canary_silent || fail "/etc/init.d/tailscale was called on a KVM"
+          echo "OK: start/stop - KVM uses S99tailscale stop then start"
+
+          # 9) KVM, config file missing (disabled): still returns 0
+          reset_state
+          IS_GLKVM=1
+          TAILSCALE_BIN_DIR=/usr/bin
+          plant_kvm_init
+          plant_canary
+          start_tailscale || fail "start_tailscale must return 0 when the KVM config is missing"
+          log_is "$INIT_LOG" start || fail "KVM init script calls were: $(cat "$INIT_LOG" 2>/dev/null)"
+          canary_silent || fail "/etc/init.d/tailscale was called on a KVM"
+          echo "OK: start/stop - a missing KVM config is only a warning"
+
+          # 10) KVM, init script fails: the functions return instead of aborting
+          reset_state
+          IS_GLKVM=1
+          TAILSCALE_BIN_DIR=/usr/bin
+          plant_kvm_init 1
+          plant_canary
+          plant_kvm_config
+          ( stop_tailscale; echo reached > /tmp/stop-returned.log ) || true
+          ( start_tailscale; echo reached > /tmp/start-returned.log ) || true
+          [ -s /tmp/stop-returned.log ] || fail "stop_tailscale aborted when the init script failed"
+          [ -s /tmp/start-returned.log ] || fail "start_tailscale aborted when the init script failed"
+          log_is "$INIT_LOG" stop start || fail "KVM init script calls were: $(cat "$INIT_LOG" 2>/dev/null)"
+          canary_silent || fail "/etc/init.d/tailscale was called on a KVM"
+          echo "OK: start/stop - a failing init script does not abort the update"
+
+          # 11) plain system: /etc/init.d/tailscale, never the KVM script
+          reset_state
+          IS_GLKVM=0
+          plant_kvm_init
+          plant_canary
+          stop_tailscale || fail "stop_tailscale returned non-zero on a plain system"
+          start_tailscale || fail "start_tailscale returned non-zero on a plain system"
+          log_is "$CANARY_LOG" stop start || fail "/etc/init.d/tailscale calls were: $(cat "$CANARY_LOG" 2>/dev/null)"
+          log_is "$INIT_LOG" || fail "S99tailscale was called on a plain system"
+          echo "OK: start/stop - plain systems keep using /etc/init.d/tailscale"
+
+          # ==============================================================================
+          # cleanup_stale_binaries
+          # ==============================================================================
+
+          # 12) the fingerprint of the broken run is removed
+          reset_state
+          IS_GLKVM=1
+          TAILSCALE_BIN_DIR=/usr/bin
+          plant_stale_sbin
+          cleanup_stale_binaries || fail "cleanup_stale_binaries returned non-zero"
+          [ ! -e /usr/sbin/tailscale ] && [ ! -L /usr/sbin/tailscale ] && [ ! -e /usr/sbin/tailscaled ] \
+              || fail "stale /usr/sbin binaries are still there: $(ls -la /usr/sbin/tailscale* 2>&1)"
+          echo "OK: cleanup - stale /usr/sbin symlink and binary are removed"
+
+          # 13-17) safety cases: nothing in /usr/sbin may change
+          cleanup_must_not_touch() {
+              before=$(ls -la /usr/sbin)
+              cleanup_stale_binaries || fail "cleanup_stale_binaries returned non-zero ($1)"
+              after=$(ls -la /usr/sbin)
+              [ "$before" = "$after" ] || fail "cleanup_stale_binaries changed /usr/sbin ($1)"
+              echo "OK: cleanup - nothing touched when $1"
+          }
+
+          reset_state
+          IS_GLKVM=0
+          TAILSCALE_BIN_DIR=/usr/bin
+          plant_stale_sbin
+          cleanup_must_not_touch "IS_GLKVM=0"
+
+          reset_state
+          IS_GLKVM=1
+          TAILSCALE_BIN_DIR=/usr/sbin
+          plant_stale_sbin
+          cleanup_must_not_touch "TAILSCALE_BIN_DIR=/usr/sbin"
+
+          reset_state
+          IS_GLKVM=1
+          TAILSCALE_BIN_DIR=/usr/bin
+          printf '%s\n' "regular tailscale" > /usr/sbin/tailscale
+          printf '%s\n' "regular tailscaled" > /usr/sbin/tailscaled
+          cleanup_must_not_touch "/usr/sbin/tailscale is a regular file"
+
+          reset_state
+          IS_GLKVM=1
+          TAILSCALE_BIN_DIR=/usr/bin
+          printf '%s\n' "regular tailscaled" > /usr/sbin/tailscaled
+          ln -sf /usr/bin/tailscaled /usr/sbin/tailscale
+          cleanup_must_not_touch "the symlink points elsewhere"
+
+          reset_state
+          IS_GLKVM=1
+          TAILSCALE_BIN_DIR=/usr/bin
+          cleanup_must_not_touch "there are no leftovers at all"
+
+          # ==============================================================================
+          # install_tiny_tailscale end to end
+          # ==============================================================================
+
+          # 18) KVM: the binaries land where S99tailscale starts them
+          reset_state
+          plant_rm10_version
+          plant_kvm_init
+          plant_canary
+          plant_kvm_config
+          plant_firmware_bin
+          plant_stale_sbin
+          printf '%s\n' "new tiny build" > /tmp/tailscaled-linux-arm64
+          detect_platform || fail "detect_platform returned non-zero before the KVM install"
+          [ "$TAILSCALE_BIN_DIR" = /usr/bin ] || fail "KVM install: TAILSCALE_BIN_DIR=$TAILSCALE_BIN_DIR"
+          install_tiny_tailscale || fail "install_tiny_tailscale returned non-zero on a KVM"
+          [ -f /usr/bin/tailscaled ] && [ ! -L /usr/bin/tailscaled ] \
+              || fail "/usr/bin/tailscaled is not a regular file"
+          [ "$(cat /usr/bin/tailscaled)" = "new tiny build" ] \
+              || fail "/usr/bin/tailscaled does not hold the downloaded binary"
+          [ -x /usr/bin/tailscaled ] || fail "/usr/bin/tailscaled is not executable"
+          [ -L /usr/bin/tailscale ] || fail "/usr/bin/tailscale is not a symlink"
+          [ "$(readlink /usr/bin/tailscale)" = /usr/bin/tailscaled ] \
+              || fail "/usr/bin/tailscale points to $(readlink /usr/bin/tailscale)"
+          [ ! -e /usr/sbin/tailscale ] && [ ! -L /usr/sbin/tailscale ] && [ ! -e /usr/sbin/tailscaled ] \
+              || fail "stale /usr/sbin binaries survived the KVM install"
+          [ ! -e /tmp/tailscaled-linux-arm64 ] || fail "the download was not removed"
+          log_is "$INIT_LOG" stop start || fail "KVM init script calls were: $(cat "$INIT_LOG" 2>/dev/null)"
+          canary_silent || fail "/etc/init.d/tailscale was called on a KVM"
+          echo "OK: install_tiny_tailscale - KVM installs into /usr/bin and cleans /usr/sbin"
+
+          # 19) plain system: unchanged behaviour, /usr/bin untouched
+          reset_state
+          plant_canary
+          plant_firmware_bin
+          printf '%s\n' "new tiny build" > /tmp/tailscaled-linux-arm64
+          detect_platform || fail "detect_platform returned non-zero before the plain install"
+          install_tiny_tailscale || fail "install_tiny_tailscale returned non-zero on a plain system"
+          [ "$(cat /usr/sbin/tailscaled)" = "new tiny build" ] \
+              || fail "/usr/sbin/tailscaled does not hold the downloaded binary"
+          [ -x /usr/sbin/tailscaled ] || fail "/usr/sbin/tailscaled is not executable"
+          [ "$(readlink /usr/sbin/tailscale)" = /usr/sbin/tailscaled ] \
+              || fail "/usr/sbin/tailscale is not a symlink to /usr/sbin/tailscaled"
+          [ ! -L /usr/bin/tailscale ] && [ "$(cat /usr/bin/tailscale)" = "firmware tailscale" ] \
+              && [ ! -L /usr/bin/tailscaled ] && [ "$(cat /usr/bin/tailscaled)" = "firmware tailscaled" ] \
+              || fail "/usr/bin was touched on a plain system"
+          log_is "$CANARY_LOG" stop start || fail "/etc/init.d/tailscale calls were: $(cat "$CANARY_LOG" 2>/dev/null)"
+          echo "OK: install_tiny_tailscale - plain systems keep /usr/sbin"
+
+          # 20) install_tailscale (--no-tiny) on a KVM: both binaries land in /usr/bin
+          reset_state
+          plant_rm10_version
+          plant_kvm_init
+          plant_canary
+          plant_firmware_bin
+          plant_stale_sbin
+          TAILSCALE_SUBDIR_IN_TAR="tailscale_1.0.0_arm64"
+          mkdir -p "/tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR"
+          printf '%s\n' "new full tailscale" > "/tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR/tailscale"
+          printf '%s\n' "new full tailscaled" > "/tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR/tailscaled"
+          detect_platform || fail "detect_platform returned non-zero before the full KVM install"
+          install_tailscale || fail "install_tailscale returned non-zero on a KVM"
+          [ "$(cat /usr/bin/tailscale)" = "new full tailscale" ] \
+              || fail "/usr/bin/tailscale does not hold the new full binary"
+          [ "$(cat /usr/bin/tailscaled)" = "new full tailscaled" ] \
+              || fail "/usr/bin/tailscaled does not hold the new full binary"
+          [ ! -e /usr/sbin/tailscale ] && [ ! -L /usr/sbin/tailscale ] && [ ! -e /usr/sbin/tailscaled ] \
+              || fail "stale /usr/sbin binaries survived the full KVM install"
+          canary_silent || fail "/etc/init.d/tailscale was called on a KVM"
+          echo "OK: install_tailscale - KVM installs the full binaries into /usr/bin"
+
+          # ==============================================================================
+          # backup
+          # ==============================================================================
+
+          # 21) config file and state dir
+          reset_state
+          IS_GLKVM=1
+          plant_kvm_config
+          plant_kvm_state
+          backup || fail "backup returned non-zero on a KVM with config and state"
+          [ -n "$BACKUP_PATH" ] && [ -s "$BACKUP_PATH" ] || fail "no archive for KVM config and state"
+          case "$BACKUP_PATH" in
+          /root/tailscale_config_backup/*.tar.gz) ;;
+          *) fail "unexpected BACKUP_PATH: $BACKUP_PATH" ;;
+          esac
+          tar tzf "$BACKUP_PATH" | grep -qx 'etc/kvmd/user/tailscale.json' \
+              || fail "archive does not contain etc/kvmd/user/tailscale.json"
+          tar tzf "$BACKUP_PATH" | grep -qx 'etc/kvmd/user/tailscale/tailscaled.state' \
+              || fail "archive does not contain etc/kvmd/user/tailscale/tailscaled.state"
+          echo "OK: backup - KVM config and state are archived"
+
+          # 22) config file only
+          reset_state
+          IS_GLKVM=1
+          plant_kvm_config
+          backup || fail "backup returned non-zero on a KVM with config only"
+          [ -n "$BACKUP_PATH" ] || fail "BACKUP_PATH is empty for a KVM config file"
+          [ "$(tar tzf "$BACKUP_PATH")" = "etc/kvmd/user/tailscale.json" ] \
+              || fail "archive holds more than the config file: $(tar tzf "$BACKUP_PATH" | tr '\n' ' ')"
+          echo "OK: backup - KVM config file alone is archived"
+
+          # 23) nothing to back up
+          reset_state
+          IS_GLKVM=1
+          backup || fail "backup must succeed on a KVM without config"
+          [ -z "$BACKUP_PATH" ] || fail "BACKUP_PATH must stay empty on a KVM without config"
+          echo "OK: backup - a KVM without config is skipped without an error"
+
+          # 24) backup directory cannot be created
+          reset_state
+          IS_GLKVM=1
+          plant_kvm_config
+          plant_kvm_state
+          : > /root/tailscale_config_backup
+          if backup 2>/dev/null; then
+              fail "backup must fail on a KVM when the backup directory cannot be created"
+          fi
+          [ -z "$BACKUP_PATH" ] || fail "BACKUP_PATH must be cleared when the KVM backup fails"
+          echo "OK: backup - a failing KVM backup aborts and clears BACKUP_PATH"
+
+          # 25) router, IS_GLKVM=0: only /etc/config/tailscale, even if kvmd files exist
+          reset_state
+          IS_GLKVM=0
+          printf '%s\n' "config settings 'settings'" > /etc/config/tailscale
+          plant_kvm_config
+          backup || fail "backup returned non-zero on a router"
+          [ "$(tar tzf "$BACKUP_PATH")" = "etc/config/tailscale" ] \
+              || fail "router archive is wrong: $(tar tzf "$BACKUP_PATH" | tr '\n' ' ')"
+          echo "OK: backup - routers still archive /etc/config/tailscale only"
+
+          # 26) router, IS_GLKVM unset (the existing backup tests run like that)
+          reset_state
+          unset IS_GLKVM
+          printf '%s\n' "config settings 'settings'" > /etc/config/tailscale
+          backup || fail "backup returned non-zero with IS_GLKVM unset"
+          tar tzf "$BACKUP_PATH" | grep -qx 'etc/config/tailscale' \
+              || fail "archive does not contain etc/config/tailscale with IS_GLKVM unset"
+          IS_GLKVM=0
+          echo "OK: backup - works with IS_GLKVM unset"
+
+          # ==============================================================================
+          # upgrade_persistance
+          # ==============================================================================
+
+          # 27) KVM: /etc/sysupgrade.conf is never created
+          reset_state
+          IS_GLINET=0
+          IS_GLKVM=1
+          USER_WANTS_PERSISTENCE="y"
+          BACKUP_PATH="/root/tailscale_config_backup/test.tar.gz"
+          upgrade_persistance || fail "upgrade_persistance returned non-zero on a KVM"
+          [ ! -e /etc/sysupgrade.conf ] || fail "/etc/sysupgrade.conf was created on a KVM"
+          echo "OK: upgrade_persistance - no /etc/sysupgrade.conf on a KVM"
+
+          # 28) KVM: an existing /etc/sysupgrade.conf stays byte-identical
+          reset_state
+          IS_GLINET=0
+          IS_GLKVM=1
+          USER_WANTS_PERSISTENCE="y"
+          BACKUP_PATH="/root/tailscale_config_backup/test.tar.gz"
+          printf '%s\n' "/etc/dropbear" "/root/tailscale_config_backup/old.tar.gz" > /etc/sysupgrade.conf
+          cp /etc/sysupgrade.conf /tmp/sysupgrade.expected
+          upgrade_persistance || fail "upgrade_persistance returned non-zero on a KVM"
+          cmp -s /etc/sysupgrade.conf /tmp/sysupgrade.expected \
+              || fail "/etc/sysupgrade.conf was modified on a KVM"
+          echo "OK: upgrade_persistance - an existing /etc/sysupgrade.conf is left alone on a KVM"
+
+          echo "All GL.iNet KVM regression tests passed"
+          EOF
+
+      - name: Run GL.iNet KVM regression tests in an isolated container
+        run: |
+          docker run --rm \
+            -v "$PWD/update-tailscale.sh:/src/update-tailscale.sh:ro" \
+            -v "$RUNNER_TEMP/test_glkvm.sh:/src/test_glkvm.sh:ro" \
+            -w /src alpine:3.20 sh /src/test_glkvm.sh
+
   log-function-tests:
     name: Log Function Tests
     runs-on: ubuntu-latest
@@ -280,8 +755,9 @@ jobs:
         run: |
           echo "Checking if all flags are documented in README..."
 
-          # Extract flags from the argument parsing section only
-          script_flags=$(sed -n '/# Read arguments/,/esac/p' update-tailscale.sh | grep -o '\--[a-z-]*' | grep -v -e 'stateful-filtering' -e 'advertise-routes' | sort -u)
+          # Extract flags from the argument parsing function only
+          script_flags=$(sed -n '/^parse_arguments() {/,/^}/p' update-tailscale.sh | grep -o '\--[a-z-]*' | grep -v -e 'stateful-filtering' -e 'advertise-routes' | sort -u)
+          [ -n "$script_flags" ] || { echo "❌ No flags found in parse_arguments()"; exit 1; }
 
           # Check each flag is in README
           for flag in $script_flags; do
@@ -309,11 +785,13 @@ jobs:
           # List of expected functions
           functions=(
             "invoke_intro"
+            "detect_platform"
             "preflight_check"
             "backup"
             "get_latest_tailscale_version_tiny"
             "get_latest_tailscale_version"
             "compress_binaries"
+            "cleanup_stale_binaries"
             "install_tailscale"
             "install_tiny_tailscale"
             "upgrade_persistance"
@@ -323,6 +801,8 @@ jobs:
             "invoke_update"
             "invoke_modify_script"
             "restart_tailscale"
+            "start_tailscale"
+            "stop_tailscale"
             "log"
             "choose_release_label"
           )
