@@ -94,6 +94,17 @@ log() {
     fi
 }
 
+tailscale_bin() {
+    # Prints the path of the installed binary ($1 is tailscale or tailscaled)
+    # so version checks never pick up a stale copy earlier in PATH.
+    # Falls back to the bare command name when it is not installed there.
+    if [ -x "$TAILSCALE_BIN_DIR/$1" ]; then
+        printf '%s\n' "$TAILSCALE_BIN_DIR/$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
 # ==============================================================================
 # System Checks & Pre-flight
 # ==============================================================================
@@ -160,6 +171,13 @@ preflight_check() {
         PREFLIGHT=1
     elif [ "$IS_GLINET" -eq 1 ]; then
         log "SUCCESS" "GL.iNet firmware version: $FIRMWARE_VERSION"
+    elif [ "$IS_GLKVM" -eq 1 ]; then
+        log "SUCCESS" "GL.iNet KVM detected: model ${GLKVM_MODEL:-unknown}, firmware ${GLKVM_VERSION:-unknown}"
+        log "INFO" "Tailscale binaries are managed in $TAILSCALE_BIN_DIR"
+        if [ ! -f "$GLKVM_INIT_SCRIPT" ]; then
+            log "ERROR" "$GLKVM_INIT_SCRIPT not found. Tailscale is not managed by this firmware, the script cannot restart it."
+            PREFLIGHT=1
+        fi
     else
         log "SUCCESS" "OpenWrt system detected"
     fi
@@ -230,9 +248,26 @@ backup() {
 
     BACKUP_PATH=""
 
-    if [ ! -e "/etc/config/tailscale" ]; then
-        log "WARNING" "/etc/config/tailscale not found. Skipping backup."
-        return 0
+    # The positional parameters collect the paths to archive, relative to /
+    set --
+    if [ "${IS_GLKVM:-0}" -eq 1 ]; then
+        # GL.iNet KVM: JSON config plus the state dir with the node identity
+        if [ -e "$GLKVM_CONFIG_FILE" ]; then
+            set -- "$@" "${GLKVM_CONFIG_FILE#/}"
+        fi
+        if [ -e "$GLKVM_STATE_DIR" ]; then
+            set -- "$@" "${GLKVM_STATE_DIR#/}"
+        fi
+        if [ "$#" -eq 0 ]; then
+            log "WARNING" "No tailscale config found in ${GLKVM_CONFIG_FILE%/*}. Skipping backup."
+            return 0
+        fi
+    else
+        if [ ! -e "/etc/config/tailscale" ]; then
+            log "WARNING" "/etc/config/tailscale not found. Skipping backup."
+            return 0
+        fi
+        set -- "etc/config/tailscale"
     fi
 
     log "INFO" "Creating backup of tailscale config"
@@ -246,7 +281,7 @@ backup() {
         return 1
     fi
 
-    if ! tar czf "$BACKUP_PATH" -C "/" "etc/config/tailscale"; then
+    if ! tar czf "$BACKUP_PATH" -C "/" "$@"; then
         log "ERROR" "Could not create tailscale config backup. Aborting update."
         rm -f "$BACKUP_PATH"
         BACKUP_PATH=""
@@ -254,7 +289,11 @@ backup() {
     fi
 
     log "SUCCESS" "Backup created: $BACKUP_PATH"
-    log "INFO" "The binaries will not be backed up, you can restore them by using the --restore flag."
+    if [ "${IS_GLKVM:-0}" -eq 1 ]; then
+        log "INFO" "The binaries will not be backed up. Use --select-release to install a specific tailscale version."
+    else
+        log "INFO" "The binaries will not be backed up, you can restore them by using the --restore flag."
+    fi
     return 0
 }
 
@@ -271,7 +310,7 @@ get_latest_tailscale_version_tiny() {
         log "ERROR" "Could not get latest tailscale version. Please check your internet connection."
         exit 1
     fi
-    TAILSCALE_VERSION_OLD="$(tailscale --version | head -1)"
+    TAILSCALE_VERSION_OLD="$("$(tailscale_bin tailscale)" --version | head -1)"
     if [ "$TAILSCALE_VERSION_NEW" = "$TAILSCALE_VERSION_OLD" ] && [ "$FORCE_UPGRADE" -eq 0 ]; then
         log "SUCCESS" "You already on the latest version: $TAILSCALE_VERSION_OLD"
         log "INFO" "You can force reinstall with the --force-upgrade flag."
@@ -325,7 +364,7 @@ get_latest_tailscale_version() {
             log "ERROR" "Could not get latest tailscale version. Please check your internet connection."
             exit 1
         fi
-        TAILSCALE_VERSION_OLD="$(tailscale --version | head -1)"
+        TAILSCALE_VERSION_OLD="$("$(tailscale_bin tailscale)" --version | head -1)"
         if [ "$TAILSCALE_VERSION_NEW" = "$TAILSCALE_VERSION_OLD" ] && [ "$FORCE_UPGRADE" -eq 0 ]; then
             log "SUCCESS" "You already have the latest version."
             exit 0
@@ -437,11 +476,39 @@ compress_binaries() {
     fi
 }
 
+cleanup_stale_binaries() {
+    # GL.iNet KVM only: earlier runs of this script installed the tiny build
+    # into /usr/sbin, where the firmware never looks (issue #89). Remove that
+    # leftover only on its exact fingerprint - /usr/sbin/tailscale is a
+    # symlink to tailscaled and /usr/sbin/tailscaled is a regular file.
+    # In every other case do nothing and print nothing.
+    local link_target
+    if [ "${IS_GLKVM:-0}" -ne 1 ] || [ "$TAILSCALE_BIN_DIR" = "/usr/sbin" ]; then
+        return 0
+    fi
+    # Never touch the directory the binaries are installed into
+    if [ "$(readlink -f "$TAILSCALE_BIN_DIR" 2>/dev/null)" = "$(readlink -f /usr/sbin 2>/dev/null)" ]; then
+        return 0
+    fi
+    if [ ! -L "/usr/sbin/tailscale" ] || [ -L "/usr/sbin/tailscaled" ] || [ ! -f "/usr/sbin/tailscaled" ]; then
+        return 0
+    fi
+    link_target=$(readlink "/usr/sbin/tailscale" 2>/dev/null)
+    case "$link_target" in
+    /usr/sbin/tailscaled | tailscaled)
+        log "INFO" "Removing stale tailscale binaries from /usr/sbin left by an earlier run"
+        rm -f "/usr/sbin/tailscale" "/usr/sbin/tailscaled"
+        ;;
+    esac
+    return 0
+}
+
 install_tailscale() {
     # Stop tailscale
     stop_tailscale
-    # Moving tailscale to /usr/sbin
-    log "INFO" "Moving tailscale to /usr/sbin"
+    cleanup_stale_binaries
+    # Moving tailscale to the directory the service starts it from
+    log "INFO" "Moving tailscale to $TAILSCALE_BIN_DIR"
     # Check if tailscale binary is present
     if [ ! -f "/tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR/tailscale" ]; then
         log "ERROR" "Tailscale binary not found. Exiting"
@@ -451,8 +518,8 @@ install_tailscale() {
         log "ERROR" "Tailscaled binary not found. Exiting"
         exit 1
     fi
-    mv /tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR/tailscale /usr/sbin/tailscale
-    mv /tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR/tailscaled /usr/sbin/tailscaled
+    mv "/tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR/tailscale" "$TAILSCALE_BIN_DIR/tailscale"
+    mv "/tmp/tailscale/$TAILSCALE_SUBDIR_IN_TAR/tailscaled" "$TAILSCALE_BIN_DIR/tailscaled"
     # Remove temporary files
     log "INFO" "Removing temporary files"
     rm -rf /tmp/tailscale
@@ -461,18 +528,19 @@ install_tailscale() {
 install_tiny_tailscale() {
     # Stop tailscale
     stop_tailscale
-    # Moving tailscale to /usr/sbin
-    log "INFO" "Moving tailscale to /usr/sbin"
+    cleanup_stale_binaries
+    # Moving tailscale to the directory the service starts it from
+    log "INFO" "Moving tailscale to $TAILSCALE_BIN_DIR"
     # Check if tailscale binary is present
     if [ ! -f "/tmp/tailscaled-linux-$TINY_ARCH" ]; then
         log "ERROR" "Tailscaled binary not found. Exiting"
         exit 1
     fi
-    mv /tmp/tailscaled-linux-$TINY_ARCH /usr/sbin/tailscaled
-    # Create symlink for tailscale
-    ln -sf /usr/sbin/tailscaled /usr/sbin/tailscale
+    mv "/tmp/tailscaled-linux-$TINY_ARCH" "$TAILSCALE_BIN_DIR/tailscaled"
+    # Create symlink for tailscale (replaces a separate firmware binary)
+    ln -sf "$TAILSCALE_BIN_DIR/tailscaled" "$TAILSCALE_BIN_DIR/tailscale"
     # Make the binary executable
-    chmod +x /usr/sbin/tailscaled
+    chmod +x "$TAILSCALE_BIN_DIR/tailscaled"
     # Remove temporary files
     log "INFO" "Removing temporary files"
     rm -rf /tmp/tailscaled-linux-$TINY_ARCH
@@ -513,6 +581,9 @@ upgrade_persistance() {
                 echo "/usr/bin/gl_tailscale" >>/etc/sysupgrade.conf
             fi
         fi
+    elif [ "${IS_GLKVM:-0}" -eq 1 ]; then
+        log "INFO" "GL.iNet KVM detected - the update lives in the root filesystem"
+        log "WARNING" "A firmware upgrade may bring back the original tailscale binaries. Re-run this script afterwards."
     else
         log "INFO" "OpenWrt detected - installation is already persistent"
         log "INFO" "No additional steps needed for persistence on OpenWrt"
@@ -597,11 +668,31 @@ restart_tailscale() {
 }
 
 start_tailscale() {
+    local rc
     log "INFO" "Starting tailscale"
     # Only on GL.iNet routers, use gl_tailscale to start
     if [ -f "/usr/bin/gl_tailscale" ]; then
         /usr/bin/gl_tailscale restart 2>/dev/null
         sleep 3
+        return
+    elif [ "${IS_GLKVM:-0}" -eq 1 ]; then
+        # Keep the init script output visible, hiding it kept issue #89 unnoticed
+        if "$GLKVM_INIT_SCRIPT" start; then
+            rc=0
+        else
+            rc=$?
+        fi
+        if [ "$rc" -ne 0 ]; then
+            log "WARNING" "$GLKVM_INIT_SCRIPT start returned $rc"
+        fi
+        sleep 3
+        # The init script only prints DISABLED when tailscale is switched off
+        # in the KVM web UI. Check its config like it does, without jq:
+        # strip all whitespace, then look for "enable":true
+        if [ ! -f "$GLKVM_CONFIG_FILE" ] ||
+            ! tr -d ' \t\r\n' <"$GLKVM_CONFIG_FILE" | grep -q '"enable":true'; then
+            log "WARNING" "Tailscale is disabled in the KVM web UI. The daemon starts once you enable it there."
+        fi
         return
     else
         /etc/init.d/tailscale start 2>/dev/null
@@ -611,10 +702,23 @@ start_tailscale() {
 }
 
 stop_tailscale() {
+    local rc
     log "INFO" "Stopping tailscale"
     # Only on GL.iNet routers, use gl_tailscale to stop
     if [ -f "/usr/bin/gl_tailscale" ]; then
         /usr/bin/gl_tailscale stop 2>/dev/null
+        sleep 3
+        return
+    elif [ "${IS_GLKVM:-0}" -eq 1 ]; then
+        # Keep the init script output visible, hiding it kept issue #89 unnoticed
+        if "$GLKVM_INIT_SCRIPT" stop; then
+            rc=0
+        else
+            rc=$?
+        fi
+        if [ "$rc" -ne 0 ]; then
+            log "WARNING" "$GLKVM_INIT_SCRIPT stop returned $rc"
+        fi
         sleep 3
         return
     else
@@ -830,8 +934,8 @@ invoke_update() {
 
 invoke_outro() {
     log "SUCCESS" "Script finished successfully. The current tailscale version (software, daemon) is:"
-    tailscale version
-    tailscaled --version
+    "$(tailscale_bin tailscale)" version
+    "$(tailscale_bin tailscaled)" --version
     echo ""
     echo ""
     echo "If you like this script, please consider supporting the project:"
@@ -844,8 +948,13 @@ invoke_outro() {
     if [ "$USER_WANTS_SSH" != "${USER_WANTS_SSH#[y]}" ]; then
         log "INFO" "Enabling Tailscale SSH support as requested"
         log "WARNING" "If you are connected to your router via Tailscale SSH, you will be disconnected now."
-        tailscale set --ssh --accept-risk=lose-ssh
+        "$(tailscale_bin tailscale)" set --ssh --accept-risk=lose-ssh
         log "SUCCESS" "Tailscale SSH support enabled."
+    fi
+
+    # On GL.iNet KVM devices tailscale is controlled from the kvmd web UI
+    if [ "${IS_GLKVM:-0}" -eq 1 ]; then
+        log "INFO" "Tailscale on this device is enabled, disabled and logged in through the KVM web UI"
     fi
 
     # Check if Tailscale is enabled in GL.iNet GUI
@@ -862,6 +971,13 @@ invoke_outro() {
 }
 
 restore() {
+    # restore runs before preflight_check, so detect the platform here
+    detect_platform
+    if [ "$IS_GLKVM" -eq 1 ]; then
+        log "ERROR" "Restore is not available on GL.iNet KVM devices: the firmware ships no /rom copy of the binaries"
+        log "INFO" "Use --select-release to install a specific tailscale version instead."
+        exit 1
+    fi
     if [ ! -f "/rom/usr/sbin/tailscale" ] || [ ! -f "/rom/usr/sbin/tailscaled" ]; then
         log "ERROR" "Cannot restore to factory default!"
         log "ERROR" "tailscale binaries (tailscale, tailscaled) not found in /rom."
