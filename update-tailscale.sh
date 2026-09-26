@@ -33,12 +33,27 @@ USER_WANTS_UPX=""
 USER_WANTS_SSH=""
 USER_WANTS_PERSISTENCE=""
 BACKUP_PATH=""
+IS_GLINET=0
+IS_GLKVM=0
+FIRMWARE_VERSION=0
+GLKVM_MODEL=""
+GLKVM_VERSION=""
+TAILSCALE_BIN_DIR="/usr/sbin"
 
 # Constants - Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 INFO='\033[0m' # No Color
+
+# Constants - GL.iNet KVM devices (Comet GL-RM1, Comet Pro GL-RM10)
+# These devices are not OpenWrt: tailscale is managed by a BusyBox init
+# script and the binaries live where its DAEMON= line points to (/usr/bin).
+GLKVM_VERSION_FILE="/etc/version"
+GLKVM_INIT_SCRIPT="/etc/init.d/S99tailscale"
+GLKVM_CONFIG_FILE="/etc/kvmd/user/tailscale.json"
+GLKVM_STATE_DIR="/etc/kvmd/user/tailscale"
+GLKVM_DEFAULT_BIN_DIR="/usr/bin"
 
 # ==============================================================================
 # Helper Functions
@@ -83,18 +98,59 @@ log() {
 # System Checks & Pre-flight
 # ==============================================================================
 
+detect_platform() {
+    # Sets IS_GLINET, FIRMWARE_VERSION, IS_GLKVM, GLKVM_MODEL, GLKVM_VERSION
+    # and TAILSCALE_BIN_DIR. Every other function reads these variables
+    # instead of probing the file system itself.
+    local daemon_path
+    IS_GLINET=0
+    IS_GLKVM=0
+    FIRMWARE_VERSION=0
+    GLKVM_MODEL=""
+    GLKVM_VERSION=""
+    TAILSCALE_BIN_DIR="/usr/sbin"
+
+    # GL.iNet router firmware (OpenWrt based) ships /etc/glversion
+    if [ -f "/etc/glversion" ]; then
+        FIRMWARE_VERSION=$(cut -c1 </etc/glversion)
+        IS_GLINET=1
+        return 0
+    fi
+
+    # GL.iNet KVM devices carry RK_MODEL=... in /etc/version and manage
+    # tailscale through a plain BusyBox init script (issue #89)
+    if grep -qs '^RK_MODEL=' "$GLKVM_VERSION_FILE" || [ -f "$GLKVM_INIT_SCRIPT" ]; then
+        IS_GLKVM=1
+        GLKVM_MODEL=$(sed -n 's/^RK_MODEL=//p' "$GLKVM_VERSION_FILE" 2>/dev/null | head -n 1)
+        GLKVM_VERSION=$(sed -n 's/^RK_VERSION=//p' "$GLKVM_VERSION_FILE" 2>/dev/null | head -n 1)
+        TAILSCALE_BIN_DIR="$GLKVM_DEFAULT_BIN_DIR"
+        # Follow the DAEMON= line of the init script so the binaries land
+        # where the service actually starts them from
+        if [ -f "$GLKVM_INIT_SCRIPT" ]; then
+            daemon_path=$(sed -n 's/^DAEMON=\([^[:space:]]*\).*$/\1/p' "$GLKVM_INIT_SCRIPT" | head -n 1)
+            daemon_path=${daemon_path#\"}
+            daemon_path=${daemon_path%\"}
+            daemon_path=${daemon_path#\'}
+            daemon_path=${daemon_path%\'}
+            case "$daemon_path" in
+            /*/tailscaled)
+                TAILSCALE_BIN_DIR="${daemon_path%/tailscaled}"
+                ;;
+            esac
+        fi
+        return 0
+    fi
+
+    # Anything else is treated as plain OpenWrt
+    return 0
+}
+
 preflight_check() {
     AVAILABLE_SPACE=$(df -P -k / | tail -n 1 | awk '{print $4/1024}')
     AVAILABLE_SPACE=$(printf "%.0f" "$AVAILABLE_SPACE")
     ARCH=$(uname -m)
-    # Check if this is a GL.iNet router or regular OpenWrt
-    if [ -f "/etc/glversion" ]; then
-        FIRMWARE_VERSION=$(cut -c1 </etc/glversion)
-        IS_GLINET=1
-    else
-        FIRMWARE_VERSION=0
-        IS_GLINET=0
-    fi
+    # Detect the platform: GL.iNet router, GL.iNet KVM or plain OpenWrt
+    detect_platform
     PREFLIGHT=0
     TINY_ARCH=""
 
