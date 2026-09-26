@@ -12,6 +12,9 @@ on:
       - 'update-tailscale.sh'
       - '.github/workflows/test-script.yaml'
 
+permissions:
+  contents: read
+
 jobs:
   shellcheck:
     name: ShellCheck Analysis
