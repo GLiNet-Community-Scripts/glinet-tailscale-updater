@@ -40,6 +40,7 @@ Created by [Admon](https://forum.gl-inet.com/u/admon/) for the GL.iNet community
 - 🎯 **Version Selection** – Install specific Tailscale versions
 - 🔧 **Stateful Filtering** – Auto-configures for exit node compatibility
 - 🛡️ **Safe Restore** – Restore original firmware binaries if needed
+- 🖥️ **GL.iNet KVM Support** – Updates Tailscale on Comet and Comet Pro, following the device's own init script
 - ⚡ **Flexible Options** – Multiple flags for customized installations
 
 ---
@@ -49,6 +50,7 @@ Created by [Admon](https://forum.gl-inet.com/u/admon/) for the GL.iNet community
 | Requirement | Details |
 |-------------|---------|
 | **Router** | GL.iNet router with firmware 4.x (including GL-BE9300 Flint 3) |
+| **GL.iNet KVM** | Comet (GL-RM1) and Comet Pro (GL-RM10); reported working by the community on firmware V1.9.1 and 1.10 |
 | **Architecture** | arm64, armv7, mips, mipsle, or x86_64 |
 | **Free Space** | At least 15 MB (can be bypassed with `--ignore-free-space`) |
 
@@ -77,7 +79,7 @@ The `update-tailscale.sh` script supports the following arguments:
 | `--ignore-free-space` | Bypasses the free space check. Use with caution on low-storage devices! |
 | `--force` | Skips all confirmation prompts and makes installation permanent. Ideal for unattended installations. |
 | `--force-upgrade` | Forces upgrade even if the current version is already up to date. Useful for reinstalling the same version. |
-| `--restore` | Restores original firmware binaries (`/usr/sbin/tailscaled` and `/usr/sbin/tailscale`). ⚠️ Does not restore config files! |
+| `--restore` | Restores original firmware binaries (`/usr/sbin/tailscaled` and `/usr/sbin/tailscale`). ⚠️ Does not restore config files! Not available on GL.iNet KVM devices. |
 | `--no-upx` | Skips UPX compression. Binaries will be larger but installation is faster. |
 | `--no-download` | Skips downloading binaries. Use pre-downloaded archive at `/tmp/tailscale.tar.gz`. |
 | `--no-tiny` | Uses full Tailscale binaries instead of tiny version. Not recommended for GL.iNet routers. |
@@ -191,6 +193,15 @@ For standard (non-tiny) binaries, UPX compression:
 - 🔹 Requires `xz` (auto-installed if missing)
 - 🔹 Can be disabled with `--no-upx`
 
+### 🖥️ GL.iNet KVM Devices (Comet, Comet Pro)
+
+GL.iNet's KVM devices are not OpenWrt, so the script handles them differently:
+- 🔹 The binaries are installed where `/etc/init.d/S99tailscale` starts them (`/usr/bin`). No firmware file is modified.
+- 🔹 The Tailscale config and state from `/etc/kvmd/user` are backed up to `/root/tailscale_config_backup` before the update.
+- 🔹 There is no `/etc/sysupgrade.conf` on these devices. A firmware upgrade may bring back the original binaries, so re-run the script afterwards.
+- 🔹 Tailscale is enabled, disabled and logged in through the KVM web UI.
+- 🔹 `--restore` is not available.
+
 ---
 
 ## 📸 Screencast
@@ -237,6 +248,7 @@ Special thanks to:
 - [Aubermean](https://github.com/Aubermean) – Clarification of `--stateful-filtering=false` ([#1](https://github.com/Admonstrator/glinet-tailscale-updater/issues/1))
 - [Dongming Han (GL.iNet)](https://github.com/handongming) - Implementing the fwmark patch for GL.iNet routers ([#82](https://github.com/admonstrator/glinet-tailscale-updater/pull/82))
 - [lmerega](https://github.com/lmerega) – Fixing the skipped Tailscale config backup ([#90](https://github.com/admonstrator/glinet-tailscale-updater/pull/90))
+- [freeatnet](https://github.com/freeatnet) and [glendonyeo](https://github.com/glendonyeo) – Analysis and workaround for GL.iNet KVM devices ([#89](https://github.com/admonstrator/glinet-tailscale-updater/issues/89))
 - All the testers and feedback providers in the GL.iNet forum!
 - Copilot – Yeah, I am using AI to help write code. But I review and test everything thoroughly!
 
